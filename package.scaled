@@ -1,0 +1,9 @@
+   name: javascript-project
+ source: git:https://github.com/scaled/javascript-project.git
+version: 1.0
+descrip: Provides services for Scaled JavaScript projects.
+ weburl: https://github.com/scaled/javascript-project
+license: New BSD
+ depend: git:https://github.com/scaled/project-service.git
+ depend: git:https://github.com/scaled/swissarmy-project.git
+ depend: git:https://github.com/scaled/pacman.git
