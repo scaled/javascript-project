@@ -19,6 +19,9 @@ object FlowProject {
   class FinderPlugin extends ProjectFinderPlugin("flow", true, classOf[FlowProject]) {
     def checkRoot (root :Path) :Int = if (exists(root, ProjectFile)) 1 else -1
   }
+
+  // used to trigger flow-mode
+  class Tag
 }
 
 class FlowProject (ps :ProjectSpace, r :Project.Root) extends AbstractFileProject(ps, r) {
@@ -63,6 +66,11 @@ class FlowProject (ps :ProjectSpace, r :Project.Root) extends AbstractFileProjec
       name = meta.get.name,
       sourceDirs = meta.get.sourceDirs.map(rootPath.resolve(_)).toSeq
     ))
+  }
+
+  override def addToBuffer (buffer :RBuffer) {
+    super.addToBuffer(buffer)
+    buffer.state[Tag]() = new Tag
   }
 
   def onFiles (dirs :SeqV[Path], op :Path => Unit) :Unit =
