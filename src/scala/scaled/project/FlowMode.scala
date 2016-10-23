@@ -13,18 +13,37 @@ import scaled.util.{Errors, Process}
 class FlowMode (env :Env, major :ReadingMode) extends MinorMode(env) {
 
   override def keymap = super.keymap.
-    bind("show-type-at-point", "M-t", "C-c C-d");
+    bind("show-type-at-point", "M-t", "C-c C-d").
+    bind("visit-element", "M-.");
 
   //
   // FNs
 
   @Fn("Describes the type at the point.")
   def showTypeAtPoint () = {
-    val path = buffer.store.file || (throw Errors.feedback("Buffer is not visiting a file."))
-    val p = view.point()
-    flow(Seq("type-at-pos", "--strip-root", path.toString(), s"${p.row+1}", s"${p.col+1}")).
-      onSuccess(lines => view.popup() = Popup.text(lines, Popup.UpRight(view.point())))
+    flowAt(view.point(), "type-at-pos", Seq("--strip-root", curPath)).onSuccess(
+      lines => view.popup() = Popup.text(lines, Popup.UpRight(view.point())))
   }
+
+  @Fn("""Navigates to the referent of the elmeent at the point.""")
+  def visitElement () = {
+    flowAt(view.point(), "get-def", Seq(curPath)).map(lines => lines(0) match {
+      case GetDefRes(file, startl, startc, endl, endc) =>
+        if (file == "") throw Errors.feedback(s"No file for definition: ${lines(0)}")
+        window.visitStack.push(env.view) // push current loc to the visit stack
+        val view = window.focus.visitFile(Store(file))
+        view.point() = Loc(startl.toInt-1, startc.toInt-1)
+      case _ =>
+        view.popup() = Popup.text(Seq("Failed to parse get-def result:") ++ lines,
+                                  Popup.UpRight(view.point()))
+    })
+  }
+
+  private def curPath =
+    (buffer.store.file || (throw Errors.feedback("Buffer is not visiting a file."))).toString
+
+  private def flowAt (p :Loc, cmd :String, args :Seq[String]) :Future[Seq[String]] =
+    flow(Seq(cmd) ++ args ++ Seq(s"${p.row+1}", s"${p.col+1}"))
 
   private def flow (args :Seq[String]) :Future[Seq[String]] =
     Process.exec(editor.exec, Seq("flow") ++ args).map(res => {
@@ -40,4 +59,6 @@ class FlowMode (env :Env, major :ReadingMode) extends MinorMode(env) {
     sb ++= res.stderr
     sb.build()
   }
+
+  private val GetDefRes = """([^:]*):(\d+):(\d+),(\d+):(\d+)""".r
 }
