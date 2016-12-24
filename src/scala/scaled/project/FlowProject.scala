@@ -46,10 +46,8 @@ class FlowProject (ps :ProjectSpace, r :Project.Root) extends AbstractFileProjec
   private def rootPath = root.path
   private def configFile = rootPath.resolve(ProjectFile)
 
-  // hibernate if the config file changes, which will trigger reload
-  metaSvc.service[WatchService].watchFile(configFile, file => hibernate())
-  // note that we don't 'close' our watches, we'll keep them active for the lifetime of the editor
-  // because it's low overhead; I may change my mind on this front later, hence this note
+  // reinit if the config file changes
+  toClose += metaSvc.service[WatchService].watchFile(configFile, file => reinit())
 
   override protected def computeMeta (oldMeta :Project.Meta) = {
     val sb = FileProject.stockIgnores
