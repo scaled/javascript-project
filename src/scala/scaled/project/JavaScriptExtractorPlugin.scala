@@ -6,10 +6,11 @@ package scaled.project
 
 import codex.extract._
 import codex.model._
+import com.eclipsesource.json._
 import com.google.common.io.CharStreams
 import java.io.{FileReader, InputStream, InputStreamReader, OutputStreamWriter, PrintWriter, Reader}
-import java.nio.file.{Path, Paths}
-import com.eclipsesource.json._
+import java.nio.file.{Files, Path, Paths}
+import scala.collection.mutable.ArrayBuffer
 import scaled._
 
 @Plugin(tag="codex-extractor")
@@ -79,12 +80,36 @@ object Flow {
 
   def main(args :Array[String]) {
     val root = Paths.get(System.getProperty("user.dir"))
-    val ast = readAST(root, new FileReader(args(0)))
-    val source = CharStreams.toString(new FileReader(args(0)))
+    val path = Paths.get(args(0))
     val out = new PrintWriter(System.out)
-    val writer = new DebugWriter(out, source)
-    new FlowExtractor(root).process(ast, Ref.Global.ROOT, writer)
+    val source = CharStreams.toString(new FileReader(args(0)))
+    new FlowExtractor(root).process(
+      new Source.File(path), Files.newBufferedReader(path), new DebugWriter(out, source))
     out.flush()
+  }
+}
+
+class SigBuilder {
+  val buffer = new StringBuffer
+  val uses = new ArrayBuffer[(Kind, Int, String)]
+
+  def append (text :String) = {
+    buffer.append(text)
+    this
+  }
+
+  def appendRef (kind :Kind, name :String) = {
+    val start = buffer.length
+    this.append(name)
+    this.uses += ((kind, start, name))
+    this
+  }
+
+  def emit(writer :Writer) {
+    writer.emitSig(buffer.toString)
+    for ((kind, offset, name) <- uses) {
+      writer.emitSigUse(Ref.Global.ROOT.plus(name), kind, offset, name)
+    }
   }
 }
 
@@ -92,14 +117,14 @@ class FlowExtractor (root :Path) extends AbstractExtractor {
 
   override def process (source :Source, reader :Reader, writer :Writer) {
     writer.openUnit(source)
-
-    // val fileName = source.fileName
     var path = source.relativePath(root.toString)
-    // path = path.substring(0, math.max(0, path.length-fileName.length-1))
+    val ast = Flow.readAST(root, reader);
+    val range = ast.asObject.get("range").asArray
+    val (start, end) = (range.get(0).asInt, range.get(1).asInt)
     val modRef = Ref.Global.ROOT.plus(path)
-    writer.openDef(modRef, path, Kind.MODULE, Flavor.PACKAGE, true, Access.PUBLIC, 0, 0, 0)
-    writer.emitSig(path)
-    process(Flow.readAST(root, reader), modRef, writer)
+    writer.openDef(modRef, path, Kind.MODULE, Flavor.PACKAGE, true, Access.PUBLIC, 0, start, end)
+    new SigBuilder().appendRef(Kind.MODULE, path).emit(writer)
+    process(ast, modRef, writer)
     writer.closeDef()
     writer.closeUnit()
   }
@@ -110,76 +135,53 @@ class FlowExtractor (root :Path) extends AbstractExtractor {
 
   def processBody (body :JsonArray, ref :Ref.Global, writer :Writer) {
     for (stmt <- body.values.map(_.asObject)) {
-      val loc = stmt.get("loc").asObject
-      stmt.get("type").asString match {
-        case "ExportNamedDeclaration" => {
-          processDecls(stmt.get("declaration").asObject, true, ref, writer)
-        }
-        case "ImportDeclaration" => {} // TODO: usages
-        case "VariableDeclaration" => processDecls(stmt, false, ref, writer)
-        case "FunctionDeclaration" => processDecls(stmt, false, ref, writer)
-        case "ClassDeclaration" => processDecls(stmt, false, ref, writer)
-        case "TypeAlias" => processDecls(stmt, false, ref, writer)
-        case "ClassProperty" => {
-          val flavor = if (stmt.get("static").asBoolean) Flavor.STATIC_FIELD else Flavor.FIELD
-          val declRef = openDecl(Kind.VALUE, flavor, stmt, "key", "value", true, ref, writer)
-          writer.emitSig(appendIdentSig(stmt.get("key").asObject).toString)
-          closeDecl(writer)
-        }
-        case "MethodDefinition" => {
-          val flavor = if (stmt.get("static").asBoolean) Flavor.STATIC_METHOD else Flavor.METHOD
-          val declRef = openDecl(Kind.FUNC, flavor, stmt, "key", "value", true, ref, writer)
-          writer.emitSig(appendMethodSig(stmt).toString)
-          closeDecl(writer)
-        }
-        case _ => println("TODO (stmt): " + stmt.get("type"))
-      }
+      processStmt(stmt, false, ref, writer)
     }
   }
 
-  def processDecls (decls :JsonObject, exported :Boolean, ref :Ref.Global, writer :Writer) {
-    decls.get("type").asString match {
-      case "VariableDeclaration" => {
-        val kind = decls.get("kind").asString
-        for (decl <- decls.get("declarations").asArray.map(_.asObject)) {
-          val flavor = if (exported) Flavor.NONE else Flavor.LOCAL // TODO: flavor for exported vars
-          val declRef = openDecl(Kind.VALUE, flavor, decl, "id", "init", exported, ref, writer)
-          writer.emitSig(appendVarSig(kind, decl).toString)
-          // { type: 'VariableDeclarator',
-          //   loc:
-          //    { source: null,
-          //      start: { line: 6, column: 13 },
-          //      end: { line: 16, column: 1 } },
-          //   range: [ 101, 204 ],
-          //   id:
-          //    { type: 'Identifier',
-          //      loc: { source: null, start: [Object], end: [Object] },
-          //      range: [ 101, 115 ],
-          //      name: 'REACTION_NAMES',
-          //      typeAnnotation: null,
-          //      optional: false },
-          //   init:
-          //    { type: 'ArrayExpression',
-          //      loc: { source: null, start: [Object], end: [Object] },
-          //      range: [ 118, 204 ],
-          //      elements:
-          //       [ [Object],
-          //         [Object],
-          //         [Object],
-          //         [Object],
-          //         [Object],
-          //         [Object],
-          //         [Object],
-          //         [Object],
-          //         [Object] ] } }
-          closeDecl(writer)
+  def processStmt (stmt :JsonObject, exported :Boolean, ref :Ref.Global, writer :Writer) {
+    stmt.get("type").asString match {
+      case "ExportNamedDeclaration"|"ExportDefaultDeclaration" =>
+        val decl = stmt.get("declaration")
+        if (decl.isObject) {
+          processStmt(decl.asObject, true, ref, writer)
+        } else {
+          if (stmt.get("specifiers") == null) {
+            println("TODO: non-obj decl")
+            dump(stmt)
+          } // else it's a reexport 'export { foo } from ...' should we note it?
         }
-      }
 
-      case "TypeAlias" => {
+      case "ImportDeclaration" => {} // TODO: usages
+
+      case "VariableDeclaration" =>
+        val kind = stmt.get("kind").asString
+        for (decl <- stmt.get("declarations").asArray.map(_.asObject)) {
+          val flavor = if (exported) Flavor.NONE else Flavor.LOCAL // TODO: flavor for exported vars
+          val id = decl.get("id").asObject
+          id.get("type").asString match {
+            case "Identifier" =>
+              val declRef = openDecl(Kind.VALUE, flavor, decl, "id", "init", exported, ref, writer)
+              appendVarSig(kind, decl).emit(writer)
+              closeDecl(writer)
+
+            case "ObjectPattern" =>
+              for (prop <- id.get("properties").asArray.map(_.asObject)) {
+                val declRef = openDecl(Kind.VALUE, flavor, prop, "key", null, exported, ref, writer)
+                appendIdentSig(Kind.VALUE, prop.get("key").asObject, new SigBuilder).emit(writer)
+                closeDecl(writer)
+              }
+              // TODO: whole decl can have type annotation, we could extract the types and pair
+              // them up with the decls, but blah
+
+            case _ => println("TODO vardecl: " + id.get("type")) ; dump(stmt)
+          }
+        }
+
+      case "TypeAlias" =>
         // TODO: Flavor for type defs
-        openDecl(Kind.TYPE, Flavor.NONE, decls, "id", "right", exported, ref, writer)
-        writer.emitSig(appendAliasSig(decls).toString)
+        openDecl(Kind.TYPE, Flavor.NONE, stmt, "id", "right", exported, ref, writer)
+        appendAliasSig(stmt).emit(writer)
         // { type: 'TypeAlias',
         //   loc:
         //    { source: null,
@@ -211,71 +213,18 @@ class FlowExtractor (root :Path) extends AbstractExtractor {
         //      indexers: [],
         //      callProperties: [] } }
         closeDecl(writer)
-      }
 
-      case "FunctionDeclaration" => {
+      case "FunctionDeclaration" =>
         // TODO: flavor for top-level functions
-        openDecl(Kind.FUNC, Flavor.NONE, decls, "id", "body", exported, ref, writer)
-        writer.emitSig(appendFuncSig(decls).toString)
-        // { type: 'FunctionDeclaration',
-        //   loc:
-        //    { source: null,
-        //      start: { line: 26, column: 0 },
-        //      end: { line: 47, column: 1 } },
-        //   range: [ 1162, 1950 ],
-        //   id:
-        //    { type: 'Identifier',
-        //      loc: { source: null, start: [Object], end: [Object] },
-        //      range: [ 1171, 1181 ],
-        //      name: 'makeButton',
-        //      typeAnnotation: null,
-        //      optional: false },
-        //   params:
-        //    [ { type: 'Identifier',
-        //        loc: [Object],
-        //        range: [Object],
-        //        name: 'presence',
-        //        typeAnnotation: null,
-        //        optional: false },
-        //      { type: 'Identifier',
-        //        loc: [Object],
-        //        range: [Object],
-        //        name: 'name',
-        //        typeAnnotation: null,
-        //        optional: false },
-        //      { type: 'Identifier',
-        //        loc: [Object],
-        //        range: [Object],
-        //        name: 'id',
-        //        typeAnnotation: null,
-        //        optional: false } ],
-        //   body:
-        //    { type: 'BlockStatement',
-        //      loc: { source: null, start: [Object], end: [Object] },
-        //      range: [ 1202, 1950 ],
-        //      body:
-        //       [ [Object],
-        //         [Object],
-        //         [Object],
-        //         [Object],
-        //         [Object],
-        //         [Object],
-        //         [Object],
-        //         [Object],
-        //         [Object] ] },
-        //   async: false,
-        //   generator: false,
-        //   predicate: null,
-        //   expression: false,
-        //   returnType: null,
-        //   typeParameters: null }
+        val funcRef = openDecl(Kind.FUNC, Flavor.NONE, stmt, "id", "body", exported, ref, writer)
+        appendFuncSig(stmt).emit(writer)
+        processStmt(stmt.get("body").asObject, false, funcRef, writer)
         closeDecl(writer)
-      }
 
-      case "ClassDeclaration" => {
-        val classRef = openDecl(Kind.TYPE, Flavor.CLASS, decls, "id", "body", exported, ref, writer)
-        writer.emitSig(appendClassSig(decls).toString)
-        processDecls(decls.get("body").asObject, false, classRef, writer)
+      case "ClassDeclaration" =>
+        val classRef = openDecl(Kind.TYPE, Flavor.CLASS, stmt, "id", "body", exported, ref, writer)
+        appendClassSig(stmt).emit(writer)
+        processStmt(stmt.get("body").asObject, false, classRef, writer)
         // { type: 'ClassDeclaration',
         //   loc:
         //    { source: null,
@@ -310,16 +259,43 @@ class FlowExtractor (root :Path) extends AbstractExtractor {
         //   implements: [],
         //   decorators: [] }
         closeDecl(writer)
-      }
 
-      case "ClassBody" => processBody(decls.get("body").asArray, ref, writer)
+      case "ClassBody" => processBody(stmt.get("body").asArray, ref, writer)
 
-      case "ClassProperty" => println("TODO: ClassProperty") ; dump(decls)
+      case "BlockStatement" => processBody(stmt.get("body").asArray, ref, writer)
 
-      case "MethodDefinition" => println("TODO: MethodDefinition") ; dump(decls)
+      case "ClassProperty" =>
+        val flavor = if (stmt.get("static").asBoolean) Flavor.STATIC_FIELD else Flavor.FIELD
+        val declRef = openDecl(Kind.VALUE, flavor, stmt, "key", "value", true, ref, writer)
+        val sig = new SigBuilder
+        appendIdentSig(Kind.VALUE, stmt.get("key"), sig)
+        val typeAnno = stmt.get("typeAnnotation")
+        if (typeAnno != null && !typeAnno.isNull()) {
+          appendTypeSig(typeAnno.asObject, sig)
+        }
+        sig.emit(writer)
+        closeDecl(writer)
 
-      case _ => println("TODO (decl): " + decls.get("type"))
+      case "MethodDefinition" =>
+        val flavor = if (stmt.get("static").asBoolean) Flavor.STATIC_METHOD else Flavor.METHOD
+        val declRef = openDecl(Kind.FUNC, flavor, stmt, "key", "value", true, ref, writer)
+        appendMethodSig(stmt).emit(writer)
+        closeDecl(writer)
+
+      case "ExpressionStatement" => processExpr(stmt.get("expression").asObject, ref, writer)
+      case "ReturnStatement" => processExpr(stmt.get("argument").asObject, ref, writer)
+
+      case "ForOfStatement" => {} // TODO
+      case "ForInStatement" => {} // TODO
+      case "ForStatement" => {} // TODO
+      case "IfStatement" => {} // TODO
+
+      case _ => println("TODO (stmt): " + stmt.get("type"))
     }
+  }
+
+  def processExpr (expr :JsonObject, ref :Ref.Global, writer :Writer) {
+    // TODO
   }
 
   def openDecl (
@@ -335,8 +311,8 @@ class FlowExtractor (root :Path) extends AbstractExtractor {
     val offset = id.get("range").asArray.get(0).asInt
     val name = id.get("name").asString
     val declRef = ref.plus(name)
-    val access = if (exported) Access.PUBLIC else Access.LOCAL
-    val (bodyStart, bodyEnd) = decl.get(bodyName) match {
+    val access = if (!exported) Access.LOCAL else if (name.startsWith("_")) Access.PROTECTED else Access.PUBLIC
+    val (bodyStart, bodyEnd) = if (bodyName == null) (0, 0) else decl.get(bodyName) match {
       case null => (0, 0)
       case init if (init.isNull) => (0, 0)
       case init =>
@@ -351,28 +327,32 @@ class FlowExtractor (root :Path) extends AbstractExtractor {
     writer.closeDef()
   }
 
-  def appendVarSig(kind :String, decl :JsonObject, into :StringBuffer = new StringBuffer) :StringBuffer = {
+  def appendVarSig(kind :String, decl :JsonObject, into :SigBuilder = new SigBuilder) :SigBuilder = {
     if (kind.length > 0) into.append(kind).append(" ")
-    appendIdentSig(decl.get("id").asObject, into)
+    decl.get("type").asString match {
+      case "VariableDeclarator" => appendIdentSig(Kind.VALUE, decl.get("id"), into)
+      case _ => println("TODO varsig") ; dump(decl)
+    }
+    into
   }
 
-  def appendAliasSig(decl :JsonObject, into :StringBuffer = new StringBuffer) :StringBuffer = {
+  def appendAliasSig(decl :JsonObject, into :SigBuilder = new SigBuilder) :SigBuilder = {
     into.append("type ")
-    appendIdentSig(decl.get("id").asObject, into)
+    appendIdentSig(Kind.TYPE, decl.get("id"), into)
     // TODO: more of the type?
   }
 
-  def appendFuncSig(decl :JsonObject, into :StringBuffer = new StringBuffer) :StringBuffer = {
+  def appendFuncSig(decl :JsonObject, into :SigBuilder = new SigBuilder) :SigBuilder = {
     into.append("function ")
-    appendIdentSig(decl.get("id").asObject, into)
+    appendIdentSig(Kind.FUNC, decl.get("id"), into)
     appendTypeParamsSig(decl.get("typeParameters"), into)
     appendParamsSig(decl, into)
     appendReturnTypeSig(decl, into)
     into
   }
 
-  def appendMethodSig(decl :JsonObject, into :StringBuffer = new StringBuffer) :StringBuffer = {
-    appendIdentSig(decl.get("key").asObject, into)
+  def appendMethodSig(decl :JsonObject, into :SigBuilder = new SigBuilder) :SigBuilder = {
+    appendIdentSig(Kind.FUNC, decl.get("key"), into)
     val funcExpr = decl.get("value").asObject
     appendTypeParamsSig(funcExpr.get("typeParameters"), into)
     appendParamsSig(funcExpr, into)
@@ -380,27 +360,15 @@ class FlowExtractor (root :Path) extends AbstractExtractor {
     into
   }
 
-  def appendTypeParamsSig(typeParamsVal :JsonValue, into :StringBuffer) {
+  def appendTypeParamsSig(typeParamsVal :JsonValue, into :SigBuilder) {
     if (!typeParamsVal.isNull()) {
       into.append("<")
-      if (typeParamsVal.isArray()) {
-        val params = typeParamsVal.asArray
-        for (ii <- 0 until params.size) {
-          if (ii > 0) into.append(",")
-          appendTypeSig(params.get(ii).asObject, into)
-        }
-      } else if (typeParamsVal.isObject()) {
-        appendTypeSig(typeParamsVal.asObject, into)
-      } else {
-        println("Unknown type params value:");
-        dump(typeParamsVal)
-        into.append("?")
-      }
+      appendTypeTypeParamsSig(typeParamsVal, into);
       into.append(">")
     }
   }
 
-  def appendParamsSig(decl :JsonObject, into :StringBuffer) {
+  def appendParamsSig(decl :JsonObject, into :SigBuilder) {
     into.append("(")
     val paramsVal = decl.get("params")
     if (!paramsVal.isNull()) {
@@ -413,74 +381,95 @@ class FlowExtractor (root :Path) extends AbstractExtractor {
     into.append(")")
   }
 
-  def appendParamSig(param :JsonObject, into :StringBuffer) {
+  def appendParamSig(param :JsonObject, into :SigBuilder) {
     param.get("type").asString match {
-      case "Identifier" => appendIdentSig(param, into)
+      case "Identifier" => appendIdentSig(Kind.VALUE, param, into)
       case "AssignmentPattern" => {
-        appendIdentSig(param.get("left").asObject)
-        into.append("=...") // TODO: 'right'
+        appendParamSig(param.get("left").asObject, into)
+        into.append(" = ...") // TODO: 'right'
+      }
+      case "RestElement" => {
+        into.append("...")
+        appendParamSig(param.get("argument").asObject, into)
+      }
+      case "FunctionTypeParam" => {
+        appendIdentSig(Kind.VALUE, param.get("name"), into)
+        into.append(" :")
+        // TODO: handle "optional"
+        appendTypeSig(param.get("typeAnnotation").asObject, into)
       }
       case _ => println("param TODO!") ; dump(param)
     }
   }
 
-  def appendReturnTypeSig(decl :JsonObject, into :StringBuffer) {
+  def appendReturnTypeSig(decl :JsonObject, into :SigBuilder) {
     val returnVal = decl.get("returnType")
     if (!returnVal.isNull()) {
       appendTypeSig(returnVal.asObject, into)
     }
   }
 
-  def appendClassSig(decl :JsonObject, into :StringBuffer = new StringBuffer) :StringBuffer = {
+  def appendClassSig(decl :JsonObject, into :SigBuilder = new SigBuilder) :SigBuilder = {
     into.append("class ")
-    appendIdentSig(decl.get("id").asObject, into)
+    appendIdentSig(Kind.TYPE, decl.get("id"), into)
     appendTypeParamsSig(decl.get("typeParameters"), into)
     // TODO: extends, implements?
     into
   }
 
-  def appendIdentSig(ident :JsonObject, into :StringBuffer = new StringBuffer) :StringBuffer = {
+  def appendIdentSig(kind :Kind, ident :JsonValue, into :SigBuilder) :SigBuilder = {
     try {
-      val name = ident.get("name").asString
-      into.append(name)
-      val typeAnno = ident.get("typeAnnotation")
-      if (typeAnno != null && !typeAnno.isNull()) {
-        appendTypeSig(typeAnno.asObject, into)
+      if (ident.isObject) {
+        val identObj = ident.asObject
+        val name = identObj.get("name").asString
+        // TODO: real ref? probably not
+        into.appendRef(kind, name)
+        val typeAnno = identObj.get("typeAnnotation")
+        if (typeAnno != null && !typeAnno.isNull()) {
+          appendTypeSig(typeAnno.asObject, into)
+        }
+      } else if (ident.isString) {
+        val name = ident.asString
+        into.appendRef(kind, name)
+      } else {
+        println("Unknown ident type " + ident)
       }
       into
     } catch {
       case e :Throwable => println("ACK " + e) ; dump(ident) ; throw e
     }
   }
-  def emitIdentSigUses(writer :Writer, identStart :Int, ident :JsonObject) {
-  }
 
-  def appendTypeSig(typeAnno :JsonObject, into :StringBuffer) :StringBuffer = {
+  def appendTypeSig(typeAnno :JsonObject, into :SigBuilder) :SigBuilder = {
     typeAnno.get("type").asString match {
       case "TypeAnnotation" => {
         into.append(" :")
         appendTypeSig(typeAnno.get("typeAnnotation").asObject, into)
       }
-      case "Identifier" => appendIdentSig(typeAnno, into)
-      case "StringTypeAnnotation" => into.append("string")
-      case "BooleanTypeAnnotation" => into.append("boolean")
-      case "NumberTypeAnnotation" => into.append("number")
-      case "VoidTypeAnnotation" => into.append("void")
-      case "AnyTypeAnnotation" => into.append("any")
+      case "Identifier" => appendIdentSig(Kind.TYPE, typeAnno, into)
+      case "StringTypeAnnotation" => into.appendRef(Kind.TYPE, "string")
+      case "BooleanTypeAnnotation" => into.appendRef(Kind.TYPE, "boolean")
+      case "NumberTypeAnnotation" => into.appendRef(Kind.TYPE, "number")
+      case "VoidTypeAnnotation" => into.appendRef(Kind.TYPE, "void")
+      case "AnyTypeAnnotation" => into.appendRef(Kind.TYPE, "any")
+      case "NullLiteralTypeAnnotation" => into.appendRef(Kind.TYPE, "null")
+      case "ExistsTypeAnnotation" => into.appendRef(Kind.TYPE, "*")
       case "NullableTypeAnnotation" => {
         into.append("?")
         appendTypeSig(typeAnno.get("typeAnnotation").asObject, into)
       }
-      case "GenericTypeAnnotation" => {
-        try {
-          appendTypeSig(typeAnno.get("id").asObject, into)
-        } catch {
-          case e :Throwable =>
-            println("ACK " + e);
-            dump(typeAnno)
-            throw e
+      case "TupleTypeAnnotation" => {
+        into.append("[")
+        val types = typeAnno.get("types").asArray
+        for (ii <- 0 until types.size) {
+          if (ii > 0) into.append(", ")
+          appendTypeSig(types.get(ii).asObject, into)
         }
-        appendTypeTypeParamsSig(typeAnno.get("typeParameters"), into)
+        into.append("]")
+      }
+      case "GenericTypeAnnotation" => {
+        appendTypeSig(typeAnno.get("id").asObject, into)
+        appendTypeParamsSig(typeAnno.get("typeParameters"), into)
       }
       case "UnionTypeAnnotation" => {
         val types = typeAnno.get("types").asArray
@@ -500,13 +489,13 @@ class FlowExtractor (root :Path) extends AbstractExtractor {
         val params = typeAnno.get("params").asArray
         for (ii <- 0 until params.size) {
           if (ii > 0) into.append(", ")
-          appendTypeSig(params.get(ii).asObject, into)
+          appendParamSig(params.get(ii).asObject, into)
         }
         into.append(") => ")
         appendTypeSig(typeAnno.get("returnType").asObject, into)
       }
       case "FunctionTypeParam" => {
-        appendIdentSig(typeAnno.get("name").asObject, into)
+        appendIdentSig(Kind.VALUE, typeAnno.get("name"), into)
         into.append(" :")
         // TODO: handle "optional"
         appendTypeSig(typeAnno.get("typeAnnotation").asObject, into)
@@ -518,33 +507,40 @@ class FlowExtractor (root :Path) extends AbstractExtractor {
         appendTypeSig(typeAnno.get("elementType").asObject, into)
         into.append("[]")
       }
-      case _ => println("TODO: type") ; dump(typeAnno) ; into.append(s"<TODO: ${typeAnno.get("type")}")
+      case "TypeParameterDeclaration" => {
+        appendTypeTypeParamsSig(typeAnno.get("params"), into)
+      }
+      case "TypeParameter" => {
+        appendIdentSig(Kind.TYPE, typeAnno.get("name"), into)
+        val bound = typeAnno.get("bound")
+        if (bound != null && !bound.isNull) {
+          appendTypeSig(bound.asObject, into)
+        }
+      }
+      case _ =>
+        println("TODO: type " + typeAnno.get("type"))
+        // dump(typeAnno)
+        into.append(s"<TODO: ${typeAnno.get("type")}")
     }
     into
   }
 
-  def appendTypeTypeParamsSig(paramsVal :JsonValue, into :StringBuffer) {
+  def appendTypeTypeParamsSig(paramsVal :JsonValue, into :SigBuilder) {
     if (paramsVal != null && !paramsVal.isNull()) {
       if (paramsVal.isArray()) {
         val params = paramsVal.asArray
-        into.append("<")
         for (ii <- 0 until params.size) {
           if (ii > 0) into.append(",")
           appendTypeSig(params.get(ii).asObject, into)
         }
-        into.append(">")
       } else if (paramsVal.isObject()) {
-        into.append("<")
         appendTypeSig(paramsVal.asObject, into)
-        into.append(">")
       } else {
+        into.append("?")
         println("Unknown type type params value:");
         dump(paramsVal)
       }
     }
-  }
-
-  def emitTypeSigUses(writer :Writer, identStart :Int, typeAnno :JsonObject) {
   }
 
   def dump(value :JsonValue) {
