@@ -7,3 +7,4 @@ license: New BSD
  depend: git:https://github.com/scaled/project-service.git
  depend: git:https://github.com/scaled/swissarmy-project.git
  depend: git:https://github.com/scaled/pacman.git
+ depend: mvn:com.eclipsesource.minimal-json:minimal-json:0.9.4
