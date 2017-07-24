@@ -11,7 +11,7 @@ import scaled.util.{BufferBuilder, Chars, Errors, SubProcess}
 
 object FlowCompiler {
   // matches: "/foo/bar/baz.kt:LL: some error message"
-  val outputM = Matcher.regexp("""^([^:]+):(\d+)$""")
+  val outputM = Matcher.regexp("""^(?:Error: )?([^:]+):(\d+)$""")
 }
 
 abstract class FlowCompiler (proj :Project) extends Compiler(proj) {
@@ -50,7 +50,6 @@ abstract class FlowCompiler (proj :Project) extends Compiler(proj) {
         val eline = outputM.group(2).toInt-1
         val ecol = 0 // outputM.group(3).toInt-1
         val ekind = "error" // outputM.group(4)
-        // every line after the path with leading whitespace is part of the message
         val desc = Seq.builder[String]()
         var pnext = ploc.nextStart
         while (pnext < buffer.end && buffer.line(pnext).length > 0) {
