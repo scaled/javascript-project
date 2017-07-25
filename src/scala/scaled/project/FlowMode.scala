@@ -21,8 +21,19 @@ class FlowMode (env :Env, major :ReadingMode) extends MinorMode(env) {
 
   @Fn("Describes the type at the point.")
   def showTypeAtPoint () = {
-    flowAt(view.point(), "type-at-pos", Seq("--strip-root", curPath)).onSuccess(
-      lines => view.popup() = Popup.text(lines, Popup.UpRight(view.point())))
+    flowAt(view.point(), "type-at-pos", Seq("--strip-root", curPath)).onSuccess(lines => {
+      val maxWidth = view.width()-2
+      val wrapped = if (!lines.exists(_.length > maxWidth)) lines
+      else {
+        val wbuf = Seq.builder[String]
+        for (line <- lines) {
+          if (line.length <= maxWidth) wbuf += line
+          else for (seg <- line.grouped(maxWidth)) wbuf += seg
+        }
+        wbuf.build
+      }
+      view.popup() = Popup.text(wrapped, Popup.UpRight(view.point()))
+    })
   }
 
   @Fn("""Navigates to the referent of the elmeent at the point.""")
