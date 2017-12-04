@@ -20,7 +20,7 @@ class FlowMode (env :Env, major :ReadingMode) extends MinorMode(env) {
   // FNs
 
   @Fn("Describes the type at the point.")
-  def showTypeAtPoint () = {
+  def showTypeAtPoint () {
     flowAt(view.point(), "type-at-pos", Seq("--strip-root", curPath)).onSuccess(lines => {
       val maxWidth = view.width()-2
       val wrapped = if (!lines.exists(_.length > maxWidth)) lines
@@ -36,8 +36,8 @@ class FlowMode (env :Env, major :ReadingMode) extends MinorMode(env) {
     })
   }
 
-  @Fn("""Navigates to the referent of the elmeent at the point.""")
-  def visitElement () = {
+  @Fn("""Navigates to the referent of the element at the point.""")
+  def visitElement () {
     flowAt(view.point(), "get-def", Seq(curPath)).map(lines => lines(0) match {
       case GetDefRes(file, startl, startc, endl, endc) =>
         if (file == "") throw Errors.feedback(s"No file for definition: ${lines(0)}")
